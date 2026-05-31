@@ -137,6 +137,20 @@ impl<'a> Binder<'a> for Function<'a> {
     fn bind(&self, builder: &mut SemanticBuilder<'a>) {
         let is_declaration = self.is_declaration();
 
+        // In ancestor-stack node storage, the redeclaration checks can't dereference
+        // a previously-declared function's (already-popped) node, so cache what they
+        // need now, keyed by this function's node id. Only named functions are ever
+        // looked up. Full storage reads the nodes directly, so skip this there.
+        if self.id.is_some() && !builder.nodes.is_full() {
+            builder.function_node_info.insert(
+                builder.current_node_id,
+                crate::builder::FunctionRedeclInfo {
+                    is_expression: !is_declaration,
+                    is_plain: !(self.r#async || self.generator),
+                },
+            );
+        }
+
         if let Some(ident) = &self.id {
             let includes = if self.declare {
                 SymbolFlags::Function | SymbolFlags::Ambient

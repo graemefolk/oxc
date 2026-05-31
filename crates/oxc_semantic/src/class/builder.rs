@@ -8,7 +8,7 @@ use oxc_ast::{
 use oxc_span::GetSpan;
 use oxc_syntax::class::{ClassId, ElementKind};
 
-use crate::{AstNodes, NodeId};
+use crate::{NodeId, node::NodeStorage};
 
 use super::{
     ClassTable,
@@ -34,7 +34,7 @@ impl<'a> ClassTableBuilder<'a> {
         &mut self,
         class: &ClassBody<'a>,
         current_node_id: NodeId,
-        nodes: &AstNodes,
+        nodes: &NodeStorage,
     ) {
         let parent_id = nodes.parent_id(current_node_id);
         self.current_class_id = Some(self.classes.declare_class(self.current_class_id, parent_id));
@@ -99,7 +99,7 @@ impl<'a> ClassTableBuilder<'a> {
         &mut self,
         ident: &PrivateIdentifier<'a>,
         current_node_id: NodeId,
-        nodes: &AstNodes,
+        nodes: &NodeStorage,
     ) {
         let parent_kind = nodes.parent_kind(current_node_id);
 

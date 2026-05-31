@@ -76,7 +76,17 @@ pub struct Semantic<'a> {
     source_type: SourceType,
 
     /// The Abstract Syntax Tree (AST) nodes.
+    ///
+    /// Empty if semantic analysis was run with ancestor-stack node storage
+    /// (see [`SemanticBuilder::with_ast_nodes`]).
     nodes: AstNodes<'a>,
+
+    /// Total number of AST nodes visited during analysis.
+    ///
+    /// Equal to `nodes.len()` in full storage mode, but recorded separately so
+    /// that [`Semantic::stats`] stays accurate even when nodes are not retained
+    /// (ancestor-stack mode), where `nodes` is empty.
+    node_count: u32,
 
     scoping: Scoping,
 
@@ -220,7 +230,7 @@ impl<'a> Semantic<'a> {
     pub fn stats(&self) -> Stats {
         #[expect(clippy::cast_possible_truncation)]
         Stats::new(
-            self.nodes.len() as u32,
+            self.node_count,
             self.scoping.scopes_len() as u32,
             self.scoping.symbols_len() as u32,
             self.scoping.references.len() as u32,
@@ -292,7 +302,8 @@ mod tests {
     ) -> Semantic<'s> {
         let parse = oxc_parser::Parser::new(allocator, source, source_type).parse();
         assert!(parse.errors.is_empty());
-        let semantic = SemanticBuilder::new().build(allocator.alloc(parse.program));
+        let semantic =
+            SemanticBuilder::new().with_ast_nodes(true).build(allocator.alloc(parse.program));
         assert!(semantic.errors.is_empty(), "Parse error: {}", semantic.errors[0]);
         semantic.semantic
     }
@@ -349,6 +360,79 @@ mod tests {
 
         let second = SemanticBuilder::new().with_check_syntax_error(true).build(&parse.program);
         assert!(second.errors.is_empty());
+    }
+
+    /// Building with full node storage (`with_ast_nodes(true)`) and with the
+    /// lightweight ancestor-stack storage (`with_ast_nodes(false)`) must produce
+    /// identical scoping data and identical syntax diagnostics. Only
+    /// `Semantic::nodes` differs: it is populated in full mode and empty in
+    /// ancestor-stack mode.
+    #[test]
+    fn node_storage_modes_are_equivalent() {
+        let sources: &[(SourceType, &str)] = &[
+            // Function redeclarations (`check_function_redeclaration` reads a
+            // previous declaration's node — the case that needs the stack-mode map).
+            (SourceType::cjs(), "function a() {} function a() {}"),
+            (SourceType::cjs(), "async function a() {} function a() {}"),
+            (SourceType::cjs(), "function* a() {} function a() {}"),
+            (SourceType::cjs(), "var a; function a() {}"),
+            (SourceType::cjs(), "class a {} function a() {}"),
+            (SourceType::mjs(), "function a() {} function a() {}"),
+            // `super` checks walk to the enclosing scope / class node (ancestors).
+            (SourceType::mjs(), "class C extends B { constructor() { super(); } }"),
+            (SourceType::mjs(), "class C { method() { return super.foo; } }"),
+            (SourceType::mjs(), "class C { get x() { return super.y; } }"),
+            (SourceType::mjs(), "const o = { m() { return super.foo; } };"),
+            (SourceType::mjs(), "class C extends B { p = super.foo; }"),
+            // Labels, break/continue, nesting (ancestor_kinds walks).
+            (SourceType::cjs(), "outer: for (;;) { for (;;) { break outer; } }"),
+            (SourceType::cjs(), "function f() { return; } l: { break l; }"),
+            // General nesting / TS.
+            (SourceType::ts(), "namespace N { export function f() {} } type T = N.f;"),
+            (SourceType::mjs(), "let a = 1; function foo(a) { return a + 1; } let b = a + foo(1);"),
+        ];
+
+        let allocator = Allocator::default();
+        for (source_type, source) in sources.iter().copied() {
+            let parse = oxc_parser::Parser::new(&allocator, source, source_type).parse();
+            assert!(parse.errors.is_empty(), "parse failed for `{source}`");
+
+            let full = SemanticBuilder::new()
+                .with_check_syntax_error(true)
+                .with_ast_nodes(true)
+                .build(&parse.program);
+            let stack = SemanticBuilder::new()
+                .with_check_syntax_error(true)
+                .with_ast_nodes(false)
+                .build(&parse.program);
+
+            let full_errors: Vec<_> = full.errors.iter().map(ToString::to_string).collect();
+            let stack_errors: Vec<_> = stack.errors.iter().map(ToString::to_string).collect();
+            assert_eq!(full_errors, stack_errors, "diagnostics differ for `{source}`");
+
+            assert_eq!(
+                full.semantic.scoping().scopes_len(),
+                stack.semantic.scoping().scopes_len(),
+                "scope count differs for `{source}`"
+            );
+            assert_eq!(
+                full.semantic.scoping().symbols_len(),
+                stack.semantic.scoping().symbols_len(),
+                "symbol count differs for `{source}`"
+            );
+            assert_eq!(
+                full.semantic.scoping().references.len(),
+                stack.semantic.scoping().references.len(),
+                "reference count differs for `{source}`"
+            );
+
+            // Nodes are recorded only in full mode.
+            assert!(!full.semantic.nodes().is_empty(), "full storage should record nodes");
+            assert!(
+                stack.semantic.nodes().is_empty(),
+                "ancestor-stack storage should not retain nodes"
+            );
+        }
     }
 
     #[test]
